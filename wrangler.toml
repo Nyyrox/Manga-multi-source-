@@ -1,0 +1,6 @@
+name = "manga-multi-source"
+main = "src/index.js"
+compatibility_date = "2026-09-09"
+
+[observability]
+enabled = true
