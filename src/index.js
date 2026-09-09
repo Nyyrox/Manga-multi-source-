@@ -1,5 +1,3 @@
-const SOURCE = "https://novelfull.net";
-
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, OPTIONS",
@@ -7,172 +5,208 @@ const CORS = {
   "Cache-Control": "public, max-age=120"
 };
 
-function response(data, status = 200, headers = {}) {
+const SOURCES = {
+  mangadex: {
+    id: "mangadex",
+    name: "MangaDex",
+    base: "https://api.mangadex.org"
+  },
+  comick: {
+    id: "comick",
+    name: "Comick",
+    base: "https://api.comick.dev"
+  }
+};
+
+function json(data, status = 200, extra = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "Content-Type": "application/json; charset=utf-8", ...CORS, ...headers }
+    headers: { "Content-Type": "application/json; charset=utf-8", ...CORS, ...extra }
   });
 }
 
-function clean(value = "") {
-  return value
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&#x27;/gi, "'")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function absoluteUrl(url) {
-  return new URL(url, SOURCE).href;
-}
-
-function safeNovelUrl(url) {
-  try {
-    const u = new URL(url);
-    return u.hostname === "novelfull.net" || u.hostname.endsWith(".novelfull.net");
-  } catch {
-    return false;
-  }
-}
-
-function slugFromUrl(url) {
-  const u = new URL(url);
-  return u.pathname.split("/").filter(Boolean)[0] || null;
-}
-
-function extractMeta(html, property) {
-  const re = new RegExp(`<meta[^>]+(?:property|name)=["']${property}["'][^>]+content=["']([^"']*)["'][^>]*>`, "i");
-  return html.match(re)?.[1] || "";
-}
-
-function extractLinks(html) {
-  const links = [];
-  const re = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    links.push({ url: absoluteUrl(m[1]), title: clean(m[2]) });
-  }
-  return links;
-}
-
-function parseNovelPage(html, url) {
-  const title = clean(html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] || extractMeta(html, "og:title"));
-  const description = clean(
-    html.match(/<div[^>]+class=["'][^"']*(?:desc-text|summary|description)[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)?.[1] ||
-    extractMeta(html, "og:description")
-  );
-  const cover = extractMeta(html, "og:image");
-
-  const chapterLinks = extractLinks(html)
-    .filter(x => x.url.includes("novelfull.net/") && /chapter|\.html$/i.test(x.url))
-    .filter(x => x.title && !/previous|next|first|last/i.test(x.title));
-
-  const seen = new Set();
-  const chapters = chapterLinks.filter(x => {
-    if (seen.has(x.url)) return false;
-    seen.add(x.url);
-    return true;
-  }).map((x, i) => ({
-    number: i + 1,
-    title: x.title,
-    url: x.url
-  }));
-
-  return {
-    source: "novelfull",
-    title,
-    slug: slugFromUrl(url),
-    url,
-    cover: cover ? absoluteUrl(cover) : null,
-    description,
-    chapters
-  };
-}
-
-function parseChapter(html, url) {
-  const title = clean(html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] || "");
-
-  let content = html.match(/<div[^>]+class=["'][^"']*chapter-content[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)?.[1];
-  if (!content) content = html.match(/<div[^>]+class=["'][^"']*(?:chapter|reading-content|content)[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)?.[1];
-
-  const text = clean(content || "");
-  return {
-    source: "novelfull",
-    title,
-    url,
-    content: text
-  };
-}
-
-async function fetchHtml(url) {
+async function getJson(url) {
   const r = await fetch(url, {
     headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; ZenkaiNovelWorker/1.0; +https://github.com/Nyyrox/Manga-multi-source-)"
+      Accept: "application/json",
+      "User-Agent": "MangaMultiSourceWorker/1.0"
     },
     cf: { cacheTtl: 120, cacheEverything: true }
   });
   if (!r.ok) throw new Error(`Source returned ${r.status}`);
-  return r.text();
+  return r.json();
+}
+
+function titleOf(m) {
+  const t = m?.attributes?.title;
+  if (t) return t.en || Object.values(t)[0] || "Unknown";
+  return m?.title || "Unknown";
+}
+
+function coverOfMd(m) {
+  const rel = (m.relationships || []).find(x => x.type === "cover_art");
+  const file = rel?.attributes?.fileName;
+  return file ? `https://uploads.mangadex.org/covers/${m.id}/${file}` : null;
+}
+
+async function searchMangaDex(q) {
+  const p = new URLSearchParams({ title: q, limit: "12", "includes[]": "cover_art" });
+  const data = await getJson(`https://api.mangadex.org/manga?${p}`);
+  return (data.data || []).map(m => ({
+    server: "mangadex",
+    source: "MangaDex",
+    id: m.id,
+    title: titleOf(m),
+    cover: coverOfMd(m),
+    url: `https://mangadex.org/title/${m.id}`,
+    access: `/source?server=mangadex&id=${m.id}`
+  }));
+}
+
+async function searchComick(q) {
+  const p = new URLSearchParams({ q, page: "1", limit: "12", t: "false", showall: "false" });
+  const data = await getJson(`https://api.comick.dev/v1.0/search/?${p}`);
+  const rows = Array.isArray(data) ? data : (data?.results || data?.data || []);
+  return rows.map(m => ({
+    server: "comick",
+    source: "Comick",
+    id: m.hid || m.id,
+    slug: m.slug,
+    title: m.title || m.name,
+    cover: m.thumbnail || m.cover_url || null,
+    url: m.slug ? `https://comick.dev/comic/${m.slug}` : null,
+    access: `/source?server=comick&id=${encodeURIComponent(m.hid || m.id || m.slug)}`
+  })).filter(x => x.id);
+}
+
+async function sourceMangaDex(id) {
+  const [manga, feed] = await Promise.all([
+    getJson(`${SOURCES.mangadex.base}/manga/${encodeURIComponent(id)}?includes[]=cover_art`),
+    getJson(`${SOURCES.mangadex.base}/manga/${encodeURIComponent(id)}/feed?limit=100&translatedLanguage[]=en&order[chapter]=asc`)
+  ]);
+  const m = manga.data;
+  return {
+    server: "mangadex",
+    source: "MangaDex",
+    id: m.id,
+    title: titleOf(m),
+    description: m.attributes?.description?.en || Object.values(m.attributes?.description || {})[0] || "",
+    status: m.attributes?.status || null,
+    cover: coverOfMd(m),
+    chapters: (feed.data || []).map(c => ({
+      id: c.id,
+      number: c.attributes?.chapter || null,
+      title: c.attributes?.title || null,
+      language: c.attributes?.translatedLanguage,
+      pages: c.attributes?.pages || 0,
+      access: `/chapter?server=mangadex&id=${c.id}`
+    }))
+  };
+}
+
+async function sourceComick(id) {
+  const isSlug = String(id).includes("-");
+  const endpoint = isSlug
+    ? `${SOURCES.comick.base}/v1.0/comic/${encodeURIComponent(id)}`
+    : `${SOURCES.comick.base}/comic/${encodeURIComponent(id)}`;
+  const comic = await getJson(endpoint);
+  const m = comic?.comic || comic?.data || comic;
+  const hid = m?.hid || id;
+  const slug = m?.slug || id;
+  const chapters = await getJson(`${SOURCES.comick.base}/v1.0/comic/${encodeURIComponent(hid)}/chapters?limit=100&page=0`);
+  const rows = Array.isArray(chapters) ? chapters : (chapters?.chapters || chapters?.data || []);
+  return {
+    server: "comick",
+    source: "Comick",
+    id: hid,
+    slug,
+    title: m?.title || m?.name || "Unknown",
+    description: m?.desc || m?.description || "",
+    cover: m?.thumbnail || m?.cover_url || null,
+    chapters: rows.map(c => ({
+      id: c.hid || c.id,
+      number: c.chap || c.chapter || null,
+      title: c.title || null,
+      language: c.lang || c.language || null,
+      access: `/chapter?server=comick&id=${encodeURIComponent(c.hid || c.id)}`
+    })).filter(c => c.id)
+  };
+}
+
+async function chapterMangaDex(id) {
+  const data = await getJson(`${SOURCES.mangadex.base}/at-home/server/${encodeURIComponent(id)}`);
+  const base = data.baseUrl;
+  const h = data.chapter?.hash;
+  const files = data.chapter?.data || [];
+  return {
+    server: "mangadex",
+    source: "MangaDex",
+    id,
+    pages: files.map((file, i) => ({ number: i + 1, url: `${base}/data/${h}/${file}` }))
+  };
+}
+
+async function chapterComick(id) {
+  const data = await getJson(`${SOURCES.comick.base}/chapter/${encodeURIComponent(id)}`);
+  const c = data?.chapter || data?.data || data;
+  const images = c?.images || c?.md_images || c?.pages || [];
+  return {
+    server: "comick",
+    source: "Comick",
+    id,
+    pages: images.map((img, i) => ({
+      number: i + 1,
+      url: typeof img === "string" ? img : (img.url || img.src || img.image_url)
+    })).filter(x => x.url)
+  };
 }
 
 async function handle(request) {
   const u = new URL(request.url);
-
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
   if (u.pathname === "/" || u.pathname === "/health") {
-    return response({ ok: true, service: "multi-source-novel-worker", sources: ["novelfull"], version: "1.0.0" });
+    return json({ ok: true, service: "manga-multi-source-worker", sources: Object.values(SOURCES).map(s => ({ id: s.id, name: s.name })) });
   }
 
   if (u.pathname === "/sources") {
-    return response({ sources: [{ id: "novelfull", name: "NovelFull", baseUrl: SOURCE }] });
+    return json({ sources: Object.values(SOURCES).map(s => ({ id: s.id, name: s.name })) });
   }
 
   if (u.pathname === "/search") {
     const q = (u.searchParams.get("q") || "").trim();
-    if (!q) return response({ error: "Missing q" }, 400);
+    if (!q) return json({ error: "Missing q" }, 400);
 
-    // NovelFull exposes search through its normal site search UI. Keep the worker
-    // restricted to the source domain instead of becoming an arbitrary proxy.
-    const searchUrl = `${SOURCE}/search.html?keyword=${encodeURIComponent(q)}`;
-    const html = await fetchHtml(searchUrl);
-    const results = extractLinks(html)
-      .filter(x => x.url.startsWith(`${SOURCE}/`))
-      .filter(x => x.title && !/chapter|login|register|home|contact|privacy|terms/i.test(x.title))
-      .filter(x => !x.url.includes("/search") && !x.url.includes("/genre/"))
-      .slice(0, 30);
-
-    const unique = [];
-    const seen = new Set();
-    for (const item of results) {
-      if (seen.has(item.url)) continue;
-      seen.add(item.url);
-      unique.push({ source: "novelfull", title: item.title, url: item.url });
+    const settled = await Promise.allSettled([searchMangaDex(q), searchComick(q)]);
+    const results = [];
+    const errors = [];
+    for (const r of settled) {
+      if (r.status === "fulfilled") results.push(...r.value);
+      else errors.push(r.reason?.message || "source failed");
     }
-    return response({ query: q, results: unique });
+
+    return json({ query: q, results, sourceCount: new Set(results.map(x => x.server)).size, errors });
   }
 
-  if (u.pathname === "/novel") {
-    const url = u.searchParams.get("url");
-    if (!url || !safeNovelUrl(url)) return response({ error: "A valid NovelFull URL is required" }, 400);
-    const html = await fetchHtml(url);
-    return response(parseNovelPage(html, url));
+  // Click/access one specific server result returned by /search.
+  if (u.pathname === "/source") {
+    const server = (u.searchParams.get("server") || "").toLowerCase();
+    const id = u.searchParams.get("id");
+    if (!SOURCES[server]) return json({ error: "Unknown server" }, 400);
+    if (!id) return json({ error: "Missing id" }, 400);
+    return json(server === "mangadex" ? await sourceMangaDex(id) : await sourceComick(id));
   }
 
+  // Get actual page/image URLs for a chapter from the selected server.
   if (u.pathname === "/chapter") {
-    const url = u.searchParams.get("url");
-    if (!url || !safeNovelUrl(url)) return response({ error: "A valid NovelFull chapter URL is required" }, 400);
-    const html = await fetchHtml(url);
-    return response(parseChapter(html, url));
+    const server = (u.searchParams.get("server") || "").toLowerCase();
+    const id = u.searchParams.get("id");
+    if (!SOURCES[server]) return json({ error: "Unknown server" }, 400);
+    if (!id) return json({ error: "Missing id" }, 400);
+    return json(server === "mangadex" ? await chapterMangaDex(id) : await chapterComick(id));
   }
 
-  return response({ error: "Not found" }, 404);
+  return json({ error: "Not found" }, 404);
 }
 
 export default {
@@ -180,7 +214,7 @@ export default {
     try {
       return await handle(request);
     } catch (error) {
-      return response({ error: error?.message || "Internal error" }, 502);
+      return json({ error: error?.message || "Internal error" }, 502);
     }
   }
 };
